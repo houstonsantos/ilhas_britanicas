@@ -1,0 +1,509 @@
+---
+title: "Modelagem Estatística de Dados"
+author: "Houston Santos"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true
+    #toc_depth: 5
+    toc_float: true
+    #theme: journal
+    #highlight: kate
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    number_section: no
+---
+
+O Conjunto de [**dados**](http://users.stat.ufl.edu/~winner/datasets.html) contém informações sobre o número de espécies em 42 ilhas britânicas. Vamos ter como variáveis: _área_, _elevação_, _número de tipos de solo_, _latitude_ e _distância da Grã-Bretanha_. O obejtiso será realizar uma modelagem estatística dos dados e utilizando **Regressão Liner Multipla** prever o número de espécies.
+
+Variáveis:
+
+ - `island`: nome da Ilha.
+ - `area`: área (km²).
+ - `elevation`: elevação máx. em metros.
+ - `number_of_soil_types`: número de tipos de solo.
+ - `latitude`: latitude (ponto médio do intervalo de latitudes em graus norte).
+ - `distance_from_britain`: distância da Grã-Bretanha (km).
+ - `number_of_species`: número de espécies.
+ 
+```{r message=FALSE, warning=FALSE}
+# Importando libs
+library(dplyr)
+library(glmnet)
+library(tidyverse)
+library(ggcorrplot)
+```
+
+# Análise Exploratória
+
+## Importação dos Dados
+```{r}
+# Importando dados
+url <- "https://users.stat.ufl.edu/~winner/data/britain_species.dat"
+dados <- read.table(url, header = FALSE, sep = "", fill = TRUE)
+
+# Renomear as colunas com nomes mais significativos
+colnames(dados) <- c("island", "area", "elevation", "number_of_soil_types", "latitude", "distance_from_britain", "number_of_species")
+
+# Verificar os dados modificados
+dados
+```
+## Preprocessamento do Dados
+
+Utilizando o pacote *tidyverse* para excluir valores NA, na importação dos dados a coluna **area** ficou como texto, 
+filtra valores em **number_of_soil_types** este filtro será aplica para uma única observação bem discrepante.
+
+```{r message=FALSE, warning=FALSE}
+# Filtrando valor, tranformando coluna em numérico e retirando NA
+dados <- dados %>%
+  select(-island) %>%
+  filter(number_of_soil_types <= 16) %>%
+  mutate(area = as.numeric(area)) %>%
+  filter(area < 200000.0) %>%
+  drop_na()
+```
+
+## Análise Gráfica dos dados {.tabset .tabset-pills .tabset-fade}
+
+### Dispersão de preditoras.
+```{r}
+# Gráfico de dispersão dos dados em relação a y
+dados %>%
+  pivot_longer(cols = c(area, elevation, number_of_soil_types, latitude, distance_from_britain), 
+               names_to = "variavel_x", values_to = "valor_x") %>%
+  ggplot(aes(x = valor_x, y = number_of_species)) +
+  geom_point() +
+  facet_wrap(~ variavel_x, ncol = 3) +
+  labs(
+    title = "Features Preditoras VS Number of Species",
+    subtitle = "Dispersão",
+    x = "Features Preditoras",
+    y = "Number of Species",
+    caption = "Miscellaneous Datasets"
+  )
+```
+
+### Latitude vs Number of Species
+```{r message=FALSE, warning=FALSE}
+# Dipersão de latitude vs number_of_species
+dados %>%
+  ggplot(aes(x = latitude, y = number_of_species)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Latitude vs Number of Species",
+    subtitle = "Feature",
+    x = "Latitude",
+    y = "Number of Species",
+    caption = "Miscellaneous Datasets"
+  ) +
+  theme_minimal()
+```
+
+### Elevation vs Number of Species
+```{r message=FALSE, warning=FALSE}
+# Dipersão de elevation vs number_of_species
+dados %>%
+  ggplot(aes(x = elevation, y = number_of_species)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Elevation vs Number of Species",
+    subtitle = "Feature",
+    x = "Elevation",
+    y = "Number of Species",
+    caption = "Miscellaneous Datasets"
+  ) +
+  theme_minimal()
+```
+
+### Distance from Britain vs Number of Species
+```{r message=FALSE, warning=FALSE}
+# Dipersão de distance_from_britain vs number_of_species
+dados %>%
+  ggplot(aes(x = distance_from_britain, y = number_of_species)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Distance from Britain vs Number of Species",
+    subtitle = "Feature",
+    x = "Distance from Britain",
+    y = "Number of Species",
+    caption = "Miscellaneous Datasets"
+  ) +
+  theme_minimal()
+```
+
+### Area vs Number of Species
+```{r message=FALSE, warning=FALSE}
+# Dipersão de Area vs number_of_species
+dados %>%
+  ggplot(aes(x = area, y = number_of_species)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Area vs Number of species",
+    subtitle = "Feature",
+    x = "Area",
+    y = "Number of species",
+    caption = "Miscellaneous Datasets"
+  ) +
+  theme_minimal()
+```
+
+### Number of Soil Types vs Number of Species
+```{r message=FALSE, warning=FALSE}
+# Dipersão de number_of_soil_types vs number_of_species
+dados %>%
+  ggplot(aes(x = number_of_soil_types, y = number_of_species)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Number of Soil Types vs Number of Species",
+    subtitle = "Feature",
+    x = "Number of Soil Types",
+    y = "Number of Species",
+    caption = "Miscellaneous Datasets"
+  ) +
+  theme_minimal()
+```
+
+### Corelação
+```{r}
+# Verifcando correlação
+ggcorrplot(
+  cor(dados),
+  hc.order = TRUE,
+  type = "lower",
+  lab = TRUE,
+  lab_size = 3.5
+)
+```
+
+# Modelo
+
+## Criando modelos de RLM
+
+```{r}
+# Criando modelos para ajuste
+modelo0 <- lm(number_of_species ~ 1, data = dados)
+modelo1 <- lm(number_of_species ~ latitude + elevation + number_of_soil_types + latitude * number_of_soil_types, data = dados)
+modelo2 <- lm(number_of_species ~ ., data = dados)
+
+# Coletando informações de ajustes dos modelos
+fit0 <- summary(modelo0)
+fit1 <- summary(modelo1)
+fit2 <- summary(modelo2)
+
+# Tabulado resultado R2 e R2_Ajustado
+R2 <- c(fit0$r.squared, fit1$r.squared, fit2$r.squared)
+R2_ajustado <- c(fit0$adj.r.squared, fit1$adj.r.squared, fit2$adj.r.squared)
+Modelo <- paste("Modelo", 0:2)
+gof <- cbind(R2, R2_ajustado)
+rownames(gof) <- Modelo
+
+gof
+```
+
+O modelo0 e um modelo para média e o modelo1 apresentaram melhores resultados iniciais, onde foi incluido algumas variáveis, 
+já no modelo2 onde incluimos todas às variáveis não performou bem. Verificando o summary do modelo1 podemos ter algumas estatísticas.
+
+```{r}
+# Resumo Modelo 01
+summary(modelo1)
+```
+
+## Seleção de Variáveis
+Encontando o que poderia ser o melhor modelo utilizando técnicas de seleção de variáveis como AIC e BIC.
+Utilizando o modelo2 e deixar que o algoritimo escolha dentre todoas às variáveis, às melhores preditoras para o modelo.
+
+### AIC
+Passando modelo2 com todas às variáveis
+
+```{r}
+m_x1 <- step(modelo2, direction = "both")
+summary(m_x1)
+```
+
+### BIC
+
+```{r}
+m_x2 <- step(modelo2, direction = "both", k = log(nrow(dados)))
+summary(m_x2)
+```
+
+## Análises dos Modelos
+
+O metodo de seleção **BIC** apontou como sendo as melhores variáveis a `latitude` e `number_of_soil_types`. 
+Analisando os modelos criados, neste caso o modelo1.
+
+Análise de resíduo do modelo
+
+```{r}
+# Gráficos residuais, para análise
+par(mfrow = c(2, 2))
+plot(modelo1)
+```
+
+A diferença encontrada entre o `R2` e `R2_Ajustado` do modelo1 indica que podemos ter uma questão de multicolinariedade 
+e o que o gráfico de `Standardized residuals vs Fitted values` nos mostra uma possivél fuga da suposição de Gausianidade dos dados.
+
+```{r}
+# Teste de siguinificancia da regresão
+anova(modelo0, modelo1)
+```
+
+```{r}
+anova(modelo1)
+```
+
+```{r}
+drop1(modelo1, test = "F")
+```
+
+# Ajustando Modelo
+
+Como no teste `F drop1` demostrou que a variável elevation não seria sigunificante, irei retirar e ver o resultado.
+
+```{r}
+m0 <- lm(number_of_species ~ latitude + number_of_soil_types + latitude * number_of_soil_types, data = dados)
+summary(m0)
+```
+
+Pode-se obesevar um pequeno ganho no R_Ajustado com a remoção da variável elevation, 
+
+## Medidas de Influência
+
+```{r}
+influ <- influence.measures(m0)
+summary(influ)
+```
+
+```{r}
+# Removendo obeservações influentes dffit
+dfits <- influ$is.inf[, 4]
+id <- which(dfits)
+
+# Atualizando modelo com retira das observação
+m1 <- update(m0, data = dados[-id,])
+summary(m1)
+```
+
+```{r}
+# Gráficos residuais, para análise
+par(mfrow = c(2, 2))
+plot(m1)
+```
+
+```{r message=FALSE, warning=FALSE}
+#
+car::vif(m1)
+```
+
+Alterando modelo.
+
+```{r}
+m2 <- lm(number_of_species ~ latitude + sqrt(number_of_soil_types) + latitude * sqrt(number_of_soil_types), data = dados)
+summary(m2)
+```
+
+```{r}
+# Gráficos residuais, para análise
+par(mfrow = c(2, 2))
+plot(m2)
+```
+
+```{r}
+#
+MASS::boxcox(m2)
+abline(v = 1, col = "red")
+```
+
+```{r message=FALSE, warning=FALSE}
+car::vif(m2)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Gráfico de Linhas Ajustadas por Grupos
+# Usando ggplot2 para ajustar linhas para diferentes grupos de latitude
+ggplot(dados, aes(x = sqrt(number_of_soil_types), y = number_of_species, color = factor(latitude > mean(latitude)))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Linhas Ajustadas por Latitude Alta e Baixa",
+       x = "sqrt(Number of Soil Types)", 
+       y = "Number of Species",
+       color = "Latitude > Média")
+
+```
+
+```{r}
+# Gráfico de Regressão Parcial (Added Variable Plot)
+# Os gráficos de variáveis adicionadas mostram o efeito de uma variável explicativa, considerando as outras já no modelo.
+#avPlots(m2)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Obter os valores preditos
+v_pretitos_m1 <- predict(m1)
+v_pretitos_m2 <- predict(m2)
+
+# Calcular o erro quadrático
+erro_quadratico_m1 <- (dados$number_of_species - v_pretitos_m1)^2
+erro_quadratico_m2 <- (dados$number_of_species - v_pretitos_m2)^2
+
+# Calcular o RMSE
+rmse_m1 <- sqrt(mean(erro_quadratico_m1))
+rmse_m2 <- sqrt(mean(erro_quadratico_m2))
+
+# Mostrar o resultado
+cat("RMSE m1:", rmse_m1, "\n")
+cat("RMSE m2:", rmse_m2, "\n")
+```
+
+## Regressão Ridge
+
+Visualizar os coeficientes: Você pode visualizar os coeficientes do modelo em diferentes valores de lambda.
+
+```{r}
+# Preparando variáveis independentes (como uma matriz) e a variável dependente.
+x <- as.matrix(dados[, c("area", "latitude", "elevation", "number_of_soil_types", "distance_from_britain")])  
+y <- dados$number_of_species
+
+# Ajustar o modelo Ridge
+m4 <- glmnet(x, y, alpha = 0)
+
+# Visualizar os coeficientes
+plot(m4, xvar = "lambda", label = TRUE)
+```
+
+Selecionar o melhor lambda: Para selecionar o valor de lambda que minimiza o erro, pode-se usar a validação cruzada com a função `cv.glmnet()`.
+
+```{r}
+# Validação cruzada para escolher o melhor lambda
+cv_ridge <- cv.glmnet(x, y, alpha = 0)
+
+# Melhor lambda
+melhor_lambda <- cv_ridge$lambda.min
+
+# Visualizar o resultado da validação cruzada
+plot(cv_ridge)
+```
+
+Ajustar o modelo final com o melhor lambda: Após identificar o melhor lambda, você pode ajustar o modelo final.
+
+```{r}
+# Ajustar o modelo final com o melhor lambda
+modelo_final <- glmnet(x, y, alpha = 0, lambda = melhor_lambda)
+
+# Coeficientes finais
+coeficientes_finais <- coef(modelo_final)
+print(coeficientes_finais)
+```
+
+```{r}
+# Fazer predições
+predicoes <- predict(modelo_final, newx = x)
+
+# Calcular RMSE
+rmse <- sqrt(mean((y - predicoes)^2))
+
+# Calcular MAE
+mae <- mean(abs(y - predicoes))
+
+# Mostrar os resultados
+cat("RMSE:", rmse, "\n")
+cat("MAE:", mae, "\n")
+```
+
+## Padronizando os Dados
+
+```{r}
+# Padronizar as colunas coluna1, coluna2 e coluna3
+df_padronizado <- dados %>%
+  mutate(across(area:number_of_species, ~ scale(.) %>% as.vector(), .names = "pz_{col}")) %>%
+  select(pz_area, pz_elevation, pz_number_of_soil_types, pz_latitude, pz_distance_from_britain, pz_number_of_species)
+
+# Ver o resultado
+print(df_padronizado)
+```
+
+```{r}
+m5 = lm(pz_number_of_species ~ ., data = df_padronizado)
+summary(m5)
+```
+
+```{r message=FALSE, warning=FALSE}
+car::vif(m5)
+```
+```{r}
+m6 <- step(m5, direction = "both", k = log(nrow(df_padronizado)))
+summary(m6)
+```
+
+```{r}
+m7 = lm(pz_number_of_species ~ pz_number_of_soil_types + pz_latitude, data = df_padronizado)
+summary(m7)
+```
+
+```{r message=FALSE, warning=FALSE}
+car::vif(m7)
+```
+
+
+```{r}
+# Gráficos residuais, para análise
+par(mfrow = c(2, 2))
+plot(m7)
+```
+
+```{r}
+influ <- influence.measures(m7)
+summary(influ)
+```
+
+```{r}
+# Removendo obeservações influentes dffit
+dfits <- influ$is.inf[, 4]
+id <- which(dfits)
+
+# Atualizando modelo com retira das observação
+m7 <- update(m7, data = df_padronizado[-id,])
+summary(m7)
+```
+
+```{r}
+# Gráficos residuais, para análise
+par(mfrow = c(2, 2))
+plot(m7)
+```
+
+```{r}
+#
+MASS::boxcox(m7)
+abline(v = 1, col = "red")
+```
+
+```{r}
+# Fazer predições
+predicoes <- predict(m7, newx = x)
+
+# Calcular RMSE
+rmse <- sqrt(mean((y - predicoes)^2))
+
+# Calcular MAE
+mae <- mean(abs(y - predicoes))
+
+# Mostrar os resultados
+cat("RMSE:", rmse, "\n")
+cat("MAE:", mae, "\n")
+```
+
+
+
+
+
+
+
+
+
